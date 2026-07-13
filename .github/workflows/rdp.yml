@@ -1,97 +1,107 @@
-name: Deploy VPS
+name: RDP by DucThang x TrueHieu (V7 - Chốt Hạ Tuyệt Đối)
 
 on:
   workflow_dispatch:
-    inputs:
-      os:
-        description: "OS"
-        required: true
-        type: choice
-        options: [Window11, Linux]
-      ram:
-        description: "RAM (GB)"
-        required: true
-        type: number
-        default: 4
-      disksize:
-        description: "Disk (GB)"
-        required: true
-        type: number
-        default: 30
-      borerdp:
-        description: "Bore tunnel"
-        required: true
-        type: boolean
-        default: true
+  schedule:
+    - cron: "0 */5 * * *"
+
+concurrency:
+  group: vps-bore-runner
+  cancel-in-progress: true
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    timeout-minutes: 1440
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup Docker
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download and Extract Bore
         run: |
-          curl -fsSL https://get.docker.com | sh
-          sudo systemctl start docker
-      - name: Deploy
+          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-pc-windows-msvc.zip" -OutFile bore.zip
+          Expand-Archive bore.zip -DestinationPath bore
+
+      - name: Enable RDP + Create Admin User
         run: |
-          if [ "${{ github.event.inputs.os }}" = "Window11" ]; then
-            VERSION="11"
-            IMAGE="dockurr/windows"
-            PORTS="8006:8006 3389:3389"
-          else
-            VERSION="22.04"
-            IMAGE="ubuntu:22.04"
-            PORTS="2222:22 5900:5900"
-          fi
-          cat > docker-compose.yml <<EOF
-          services:
-            vm:
-              image: \${IMAGE}
-              container_name: vm
-              environment:
-                VERSION: "\${VERSION}"
-                RAM_SIZE: "${{ github.event.inputs.ram }}G"
-                DISK_SIZE: "${{ github.event.inputs.disksize }}G"
-              devices:
-                - /dev/kvm
-                - /dev/net/tun
-              cap_add:
-                - NET_ADMIN
-              ports:
-                \${PORTS}
-              volumes:
-                - ./data:/storage
-              restart: always
-          EOF
-          docker compose up -d
-      - name: Bore
-        if: ${{ github.event.inputs.borerdp == true }}
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          $pass = ConvertTo-SecureString "WindowsRDP2026@" -AsPlainText -Force
+          New-LocalUser "admin" -Password $pass -FullName "admin"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "admin"
+          Add-LocalGroupMember -Group "Administrators" -Member "admin"
+
+      - name: Tối ưu Registry 4K
         run: |
-          curl -L https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz | tar -xz
-          sudo mv bore /usr/local/bin/
-          if [ "${{ github.event.inputs.os }}" = "Window11" ]; then
-            sleep 120
-            docker exec vm cmd.exe /c "net user admin VPSFree2026@@ /add"
-            docker exec vm cmd.exe /c "net localgroup administrators admin /add"
-            docker exec vm cmd.exe /c "reg add HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server /v fDenyTSConnections /t REG_DWORD /d 0 /f"
-            docker exec vm cmd.exe /c "netsh advfirewall firewall set rule group=\"remote desktop\" new enable=Yes"
-            sudo bore local 3389 --to bore.pub &
-          else
-            sleep 60
-            docker exec vm bash -c "echo admin:VPSFree2026@@ | chpasswd"
-            docker exec vm bash -c "service ssh start"
-            sudo bore local 2222 --to bore.pub &
-          fi
-          sleep 10
-          PORT=$(sudo lsof -i -P -n | grep bore | grep LISTEN | head -1 | sed -E "s/.*:([0-9]+).*/\1/")
-          echo "PORT=${PORT}" >> $GITHUB_ENV
-      - name: Result
+          $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (!(Test-Path $tsPath)) { New-Item -Path $tsPath -Force }
+          Set-ItemProperty -Path $tsPath -Name "fEnableVirtualizedGraphics" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "MinFrameRate" -Value 120 -Type DWord
+
+      - name: Monitor Bore Stream & Force Update File
         run: |
-          echo "✅ Deployment Complete!"
-          echo "OS: ${{ github.event.inputs.os }}"
-          echo "RAM: ${{ github.event.inputs.ram }}GB"
-          echo "Disk: ${{ github.event.inputs.disksize }}GB"
-          echo "Access: bore.pub:${PORT}"
-          echo "User: admin"
-          echo "Pass: VPSFree2026@@"
+          $PASS = "WindowsRDP2026@"
+          $USER = "admin"
+          $lastFullAddress = ""
+
+          # Cấu hình Git ép buộc
+          git config --global user.name "TrueHieu-Bot"
+          git config --global user.email "bot@trueteam.top"
+          git config --global core.autocrlf false
+
+          Write-Host "🚀 Đang truy quét Stream của Bore... Đợi Port về nhé đại ca!"
+
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = ".\bore\bore.exe"
+          $psi.Arguments = "local 3389 --to bore.pub"
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $process = [System.Diagnostics.Process]::Start($psi)
+
+          while (!$process.HasExited) {
+              $line = $process.StandardOutput.ReadLine()
+              if ($line) { Write-Host "[bore] $line" }
+              # Bore v0.5.1 in: "listening at bore.pub:PORT"; bản cũ: "remote forwarding at bore.pub:PORT"
+              if ($line -match "(?:listening at|remote forwarding at) (bore\.pub:\d+)") {
+                  $fullAddress = $matches[1]
+                  $portOnly = $fullAddress.Split(':')[1]
+
+                  if ($fullAddress -ne $lastFullAddress) {
+                      $lastFullAddress = $fullAddress
+                      
+                      # LOGIC GHI ĐÈ MẠNH MẼ: Xóa sạch file cũ nếu có để tránh kẹt
+                      if (Test-Path "rdp_info.txt") { Remove-Item "rdp_info.txt" -Force }
+
+                      $createdAt = (Get-Date).ToString('HH:mm:ss dd/MM/yyyy')
+                      $reportLines = @(
+                        '=======================================================',
+                        'RDP INFO - DucThang x TrueHieu Edition',
+                        '=======================================================',
+                        "FULL ADDRESS   : $fullAddress",
+                        "PORT           : $portOnly",
+                        'HOST           : bore.pub',
+                        '-------------------------------------------------------',
+                        "Username       : $USER",
+                        "Password       : $PASS",
+                        "Created        : $createdAt",
+                        '======================================================='
+                      )
+                      $report = ($reportLines -join "`r`n")
+                      [System.IO.File]::WriteAllText("$(Get-Location)\rdp_info.txt", $report)
+                      
+                      # Commit và Push bằng lệnh Force
+                      git checkout main
+                      git add rdp_info.txt
+                      git commit -m "Update RDP: $portOnly [skip ci]"
+                      git push origin main --force
+                      
+                      Write-Host "✅ ĐÃ ÉP CẬP NHẬT REPO: $fullAddress"
+                  }
+              }
+              Start-Sleep -Milliseconds 200
+          }
