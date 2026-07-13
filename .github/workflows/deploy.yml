@@ -1,0 +1,119 @@
+name: Deploy VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS"
+        required: true
+        type: choice
+        options:
+          - Window11
+          - Linux
+      ram:
+        description: "RAM (GB)"
+        required: true
+        type: number
+        default: 4
+      disksize:
+        description: "Disk (GB)"
+        required: true
+        type: number
+        default: 30
+      borerdp:
+        description: "Bore tunnel"
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Docker
+        run: |
+          curl -fsSL https://get.docker.com | sh
+          sudo systemctl start docker
+          
+      - name: Deploy VM
+        run: |
+          if [ "${{ github.event.inputs.os }}" = "Window11" ]; then
+            VERSION="11"
+            IMAGE="dockurr/windows"
+            PORTS="8006:8006 3389:3389"
+          else
+            VERSION="22.04"
+            IMAGE="ubuntu:22.04"
+            PORTS="2222:22 5900:5900"
+          fi
+          
+          cat > docker-compose.yml <<EOF
+          services:
+            vm:
+              image: \${IMAGE}
+              container_name: vm
+              environment:
+                VERSION: "\${VERSION}"
+                RAM_SIZE: "${{ github.event.inputs.ram }}G"
+                DISK_SIZE: "${{ github.event.inputs.disksize }}G"
+              devices:
+                - /dev/kvm
+                - /dev/net/tun
+              cap_add:
+                - NET_ADMIN
+              ports:
+                \${PORTS}
+              volumes:
+                - ./data:/storage
+              restart: always
+          EOF
+          
+          docker compose up -d
+          
+      - name: Setup bore tunnel
+        if: ${{ github.event.inputs.borerdp == true }}
+        run: |
+          curl -L https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz | tar -xz
+          sudo mv bore /usr/local/bin/
+          
+          if [ "${{ github.event.inputs.os }}" = "Window11" ]; then
+            sleep 120
+            docker exec vm cmd.exe /c "net user admin VPSFree2026@@ /add"
+            docker exec vm cmd.exe /c "net localgroup administrators admin /add"
+            docker exec vm cmd.exe /c "reg add HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server /v fDenyTSConnections /t REG_DWORD /d 0 /f"
+            docker exec vm cmd.exe /c "netsh advfirewall firewall set rule group=\"remote desktop\" new enable=Yes"
+            sudo bore local 3389 --to bore.pub &
+          else
+            sleep 60
+            docker exec vm bash -c "echo admin:VPSFree2026@@ | chpasswd"
+            docker exec vm bash -c "service ssh start"
+            sudo bore local 2222 --to bore.pub &
+          fi
+          
+          sleep 10
+          PORT=$(sudo lsof -i -P -n | grep bore | grep LISTEN | head -1 | sed -E "s/.*:([0-9]+).*/\1/")
+          echo "PORT=${PORT}" >> $GITHUB_ENV
+          
+      - name: Show access info
+        run: |
+          echo "=========================================="
+          echo "✅ DEPLOYMENT COMPLETE!"
+          echo "------------------------------------------"
+          echo "OS: ${{ github.event.inputs.os }}"
+          echo "RAM: ${{ github.event.inputs.ram }}GB"
+          echo "Disk: ${{ github.event.inputs.disksize }}GB"
+          echo "------------------------------------------"
+          if [ "${{ github.event.inputs.borerdp }}" = "true" ]; then
+            echo "🔗 Access: bore.pub:${PORT}"
+          else
+            if [ "${{ github.event.inputs.os }}" = "Window11" ]; then
+              echo "🌐 noVNC: http://localhost:8006"
+            else
+              echo "🔗 SSH: localhost:2222"
+            fi
+          fi
+          echo "👤 Username: admin"
+          echo "🔑 Password: VPSFree2026@@"
+          echo "=========================================="
